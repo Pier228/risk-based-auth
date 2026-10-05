@@ -1,0 +1,18 @@
+model User {
+  id             String  @id @default(uuid())
+  email          String  @unique
+  password       String
+  emailConfirmed Boolean @default(false) @map("email_confirmed")
+
+  twoFactorAuthEnabled Boolean @default(false) @map("two_factor_auth_enabled")
+  twoFactorCountry     String? @map("two_factor_country")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  Token        Token[]
+  Confirmation Confirmation[]
+  Profile      Profile?
+
+  @@map("users")
+}

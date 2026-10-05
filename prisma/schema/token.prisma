@@ -1,0 +1,13 @@
+model Token {
+    id                 String   @id @default(uuid())
+    userId             String   @map("user_id")
+    expiresAt          DateTime @map("expires_at")
+    twoFactorUserAgent String?  @map("two_factor_user_agent")
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@map("tokens")
+}
