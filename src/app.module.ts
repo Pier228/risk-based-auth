@@ -44,11 +44,20 @@ import { TokenModule } from './shared/token/token.module';
       isGlobal: true,
       useFactory: async (configService: ConfigService) => {
         const redisUrl = configService.get<string>('REDIS_CONNECT');
+        const memoryStore = new Keyv();
+
+        if (!redisUrl) {
+          return {
+            stores: [memoryStore],
+            ttl: ACCESS_TOKEN_CONFIG.MAX_AGE,
+          };
+        }
+
         const redisStore = createKeyv(redisUrl);
         redisStore.on('error', (err) => {
           console.warn('Redis Cache connection error:', err?.message || err);
         });
-        const memoryStore = new Keyv();
+
         return {
           stores: [redisStore, memoryStore],
           ttl: ACCESS_TOKEN_CONFIG.MAX_AGE,
