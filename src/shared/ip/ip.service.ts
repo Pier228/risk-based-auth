@@ -20,9 +20,6 @@ export class IPService {
     const ip: string | null = this.getClientIp(req);
     const country = ip ? await this.fetchCountryByIP(ip) : null;
 
-    console.log(ip);
-    console.log(country);
-
     if (!country) {
       return null;
     }
