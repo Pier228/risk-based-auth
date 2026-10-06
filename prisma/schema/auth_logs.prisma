@@ -6,8 +6,8 @@ model AuthLog {
     ip         String?
     country    String?
     city       String?
-    latitude   Float?
-    longitude  Float?
+    lat        Float?   @map("latitude")
+    lon        Float?   @map("longitude")
     timezone   String?
     regionName String?  @map("region_name")
     continent  String?
@@ -22,6 +22,7 @@ model AuthLog {
     createdAt DateTime @default(now()) @map("created_at")
     updatedAt DateTime @updatedAt @map("updated_at")
 
+    @@unique([userId, ip])
     @@index([userId, ip])
     @@map("auth_logs")
 }
