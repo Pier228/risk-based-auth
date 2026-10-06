@@ -31,7 +31,7 @@ export class IPService {
   private async fetchCountryByIP(ip: string): Promise<string | null> {
     try {
       const res = await fetch(
-        `http://ip-api.com/json/${ip}?fields=status,message,country,query,city,lat,lon,timezone,regionName`,
+        `http://ip-api.com/json/${ip}?fields=status,message,country,query,city,lat,lon,timezone,regionName,continent,isp,org,as,asname,mobile,proxy,hosting`,
       );
       const json = await res.json();
 
@@ -141,6 +141,18 @@ export class IPService {
   }
 
   private isIp(value: unknown): value is string {
-    return typeof value === 'string' && net.isIP(value) !== 0;
+    if (typeof value !== 'string') {
+      return false;
+    }
+
+    if (
+      value === '::1' ||
+      value === '127.0.0.1' ||
+      value === '::ffff:127.0.0.1'
+    ) {
+      return false;
+    }
+
+    return net.isIP(value) !== 0;
   }
 }

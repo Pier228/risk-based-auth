@@ -10,9 +10,11 @@ model User {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  Token        Token[]
-  Confirmation Confirmation[]
-  Profile      Profile?
+  Profile        Profile?
+  Token          Token[]
+  Confirmation   Confirmation[]
+  trustedDevices TrustedDevice[]
+  authLogs       AuthLog[]
 
   @@map("users")
 }

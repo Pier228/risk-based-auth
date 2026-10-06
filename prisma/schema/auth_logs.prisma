@@ -1,0 +1,27 @@
+model AuthLog {
+    id     String @id @default(uuid())
+    userId String @map("user_id")
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    ip         String?
+    country    String?
+    city       String?
+    latitude   Float?
+    longitude  Float?
+    timezone   String?
+    regionName String?  @map("region_name")
+    continent  String?
+    isp        String?
+    org        String?
+    as         String?
+    asname     String?
+    mobile     Boolean?
+    proxy      Boolean?
+    hosting    Boolean?
+
+    createdAt DateTime @default(now()) @map("created_at")
+    updatedAt DateTime @updatedAt @map("updated_at")
+
+    @@index([userId, ip])
+    @@map("auth_logs")
+}
