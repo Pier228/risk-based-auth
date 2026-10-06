@@ -1,8 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as net from 'net';
 import type RequestWithId from 'src/common/entities/IRequestWithId';
-import { BcryptService } from '../bcrypt/bcrypt.service';
 import { PROXY_HEADERS } from 'src/common/globals';
+import type IIpInfo from './entities/IIpInfo';
 
 @Injectable()
 export class IPService {
@@ -10,25 +10,21 @@ export class IPService {
     timestamp: true,
   });
 
-  constructor(private readonly bcryptService: BcryptService) {}
-
-  // Get hashed country by ip address
-  async getCountryByIp(
-    req: RequestWithId,
-    hashed: boolean = false,
-  ): Promise<string | null> {
+  async getInfoFromIp(req: RequestWithId): Promise<IIpInfo | null> {
     const ip: string | null = this.getClientIp(req);
-    const country = ip ? await this.fetchCountryByIP(ip) : null;
+    const ipInfo = ip ? await this.fetchInfoFromIP(ip) : null;
 
-    if (!country) {
+    if (!ipInfo) {
       return null;
     }
+    const { status, query, ...rest } = ipInfo;
 
-    return hashed ? await this.bcryptService.hash(country) : country;
+    return { ip, ...rest } as IIpInfo;
   }
 
-  // Get country by ip address
-  private async fetchCountryByIP(ip: string): Promise<string | null> {
+  private async fetchInfoFromIP(
+    ip: string,
+  ): Promise<Record<string, any> | null> {
     try {
       const res = await fetch(
         `http://ip-api.com/json/${ip}?fields=status,message,country,query,city,lat,lon,timezone,regionName,continent,isp,org,as,asname,mobile,proxy,hosting`,
@@ -46,7 +42,7 @@ export class IPService {
         return null;
       }
 
-      return json.country;
+      return json;
     } catch (error) {
       this.logger.error(
         `Error requesting IP geolocation: ${(error as Error).message}`,

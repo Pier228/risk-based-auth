@@ -7,7 +7,6 @@ import { Request, Response } from 'express';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { Token, User } from 'generated/prisma';
-import { BcryptService } from '../bcrypt/bcrypt.service';
 import {
   ACCESS_TOKEN_CONFIG,
   getCookieConfig,
@@ -20,16 +19,11 @@ export class TokenService {
   constructor(
     private readonly jwtService: JwtService,
     private readonly prismaService: PrismaService,
-    private readonly bcryptService: BcryptService,
   ) {}
 
-  async setAuthCookies(
-    user: User,
-    response: Response,
-    request: Request,
-  ): Promise<void> {
+  async setAuthCookies(user: User, response: Response): Promise<void> {
     await this.createAndSetAccessToken(response, user.id);
-    const newRefreshToken = await this.createRefreshToken(user, request);
+    const newRefreshToken = await this.createRefreshToken(user);
     this.setRefreshTokenCookie(response, newRefreshToken);
   }
 
@@ -56,7 +50,7 @@ export class TokenService {
 
     const [, newRefreshToken] = await Promise.all([
       this.prismaService.token.delete({ where: { id: tokenRecord.id } }),
-      this.createRefreshToken(tokenRecord.user, req),
+      this.createRefreshToken(tokenRecord.user),
       this.createAndSetAccessToken(res, tokenRecord.userId),
     ]);
 
@@ -70,22 +64,18 @@ export class TokenService {
     token: Token & { user: User },
     response: Response,
   ): Promise<void> {
-    if (!token.twoFactorUserAgent) return;
-
-    const userAgent = request.headers['user-agent'];
-
-    if (!userAgent) {
-      await this.clearCompromisedToken(response, token.id);
-    }
-
-    const isMatch = await this.bcryptService.compare(
-      userAgent as string,
-      token.twoFactorUserAgent,
-    );
-
-    if (!isMatch) {
-      await this.clearCompromisedToken(response, token.id);
-    }
+    // if (!token.twoFactorUserAgent) return;
+    // const userAgent = request.headers['user-agent'];
+    // if (!userAgent) {
+    //   await this.clearCompromisedToken(response, token.id);
+    // }
+    // const isMatch = await this.bcryptService.compare(
+    //   userAgent as string,
+    //   token.twoFactorUserAgent,
+    // );
+    // if (!isMatch) {
+    //   await this.clearCompromisedToken(response, token.id);
+    // }
   }
 
   // Generate and set JWT access token inside response cookies
@@ -109,21 +99,14 @@ export class TokenService {
     );
   }
 
-  private async createRefreshToken(
-    { id, twoFactorAuthEnabled }: User,
-    request: Request,
-  ): Promise<string> {
+  private async createRefreshToken({ id }: User): Promise<string> {
     const expiresAt = new Date(Date.now() + REFRESH_TOKEN_CONFIG.MAX_AGE);
-    const twoFactorUserAgent = twoFactorAuthEnabled
-      ? await this.hashUserAgent(request)
-      : null;
 
     try {
       const token = await this.prismaService.token.create({
         data: {
           userId: id,
           expiresAt,
-          twoFactorUserAgent,
         },
       });
       return token.id;
@@ -132,12 +115,6 @@ export class TokenService {
         `Failed to create refresh token: ${err.message}`,
       );
     }
-  }
-
-  private async hashUserAgent(request: Request): Promise<string | null> {
-    const userAgent = request.headers['user-agent'];
-    if (!userAgent) return null;
-    return this.bcryptService.hash(userAgent);
   }
 
   private async getAndVerifyRefreshToken(

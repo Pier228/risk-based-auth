@@ -31,7 +31,6 @@ export class PostConfirmationService {
     return this.authorizeUser(
       user,
       response,
-      request,
       'User successfully confirmed email address',
     ); // Create and set auth cookies
   }
@@ -47,26 +46,29 @@ export class PostConfirmationService {
     const user = await prisma.user.findUnique({ where: { id } });
 
     if (user && !user.twoFactorAuthEnabled) {
-      return this.authorizeUser(user, response, request); // Create and set auth cookies
+      return this.authorizeUser(user, response); // Create and set auth cookies
     }
 
-    const hashedCountry = await this.ipService.getCountryByIp(request, true); // Get hashedCountry
-    hashedCountry &&
-      (await prisma.user.update({
-        where: { id, twoFactorAuthEnabled: true },
-        data: { twoFactorCountry: hashedCountry },
-      }));
+    const ipInfo = await this.ipService.getInfoFromIp(request);
+    const isApiLinked = await prisma.authLog.findFirst({
+      where: { userId: id, ip: ipInfo?.ip },
+    });
 
-    return this.authorizeUser(user, response, request); // Create and set auth cookies
+    if (ipInfo && !isApiLinked) {
+      await prisma.authLog.create({
+        data: { userId: id, ...ipInfo },
+      });
+    }
+
+    return this.authorizeUser(user, response); // Create and set auth cookies
   }
 
   private async authorizeUser(
     user: User,
     response: Response,
-    request: Request,
     message?: string,
   ): Promise<{ message: string }> {
-    await this.tokenService.setAuthCookies(user, response, request); // Create and set auth cookies
+    await this.tokenService.setAuthCookies(user, response); // Create and set auth cookies
     return { message: message ?? 'User successfully authorized' };
   }
 }
