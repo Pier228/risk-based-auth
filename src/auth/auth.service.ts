@@ -71,7 +71,7 @@ export class AuthService {
     user.twoFactorAuthEnabled &&
       (await this.twoFactorAuthSecurity(user, request));
 
-    await this.tokenService.setAuthCookies(user, response, request); // Create and set auth cookies
+    await this.tokenService.setAuthCookies(user, response); // Create and set auth cookies
 
     return { message: 'User successfully logged in' };
   }
