@@ -5,7 +5,6 @@ model User {
   emailConfirmed Boolean @default(false) @map("email_confirmed")
 
   twoFactorAuthEnabled Boolean @default(false) @map("two_factor_auth_enabled")
-  twoFactorCountry     String? @map("two_factor_country")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
