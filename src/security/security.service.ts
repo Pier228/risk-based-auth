@@ -16,6 +16,7 @@ import {
   RISK_BASED_AUTH_CONFIG,
 } from 'src/common/globals';
 import { IPService } from 'src/shared/ip/ip.service';
+import { calculateHaversineDistance } from 'src/common/utils/geo.util';
 
 @Injectable()
 export class SecurityService {
@@ -125,7 +126,7 @@ export class SecurityService {
     }
 
     if (!isDeviceTrusted) {
-      riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VISITOR_ID_MISMATCH; 
+      riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VISITOR_ID_MISMATCH;
     }
 
     // 2. IP & Geolocation Analysis
@@ -142,7 +143,7 @@ export class SecurityService {
             3600;
 
           if (timeDiffHours >= minIntervalHours) {
-            const distanceKm = this.calculateHaversineDistance(
+            const distanceKm = calculateHaversineDistance(
               latestLog.lat,
               latestLog.lon,
               ipInfo.lat,
@@ -153,7 +154,7 @@ export class SecurityService {
               speedKmh >
               RISK_BASED_AUTH_CONFIG.VELOCITY_LIMITS.MAX_REALISTIC_SPEED_KMH
             ) {
-              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.IMPOSSIBLE_TRAVEL; 
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.IMPOSSIBLE_TRAVEL;
             }
           }
         }
@@ -166,7 +167,7 @@ export class SecurityService {
             log.continent?.toLowerCase() === ipInfo.continent?.toLowerCase(),
         );
         if (!knownContinent) {
-          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CONTINENT; 
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CONTINENT;
         }
       }
 
@@ -176,7 +177,7 @@ export class SecurityService {
           (log) => log.country?.toLowerCase() === ipInfo.country?.toLowerCase(),
         );
         if (!knownCountry) {
-          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_COUNTRY; 
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_COUNTRY;
         } else {
           // If country is recognized — verify city and region
           if (ipInfo.city) {
@@ -184,7 +185,7 @@ export class SecurityService {
               (log) => log.city?.toLowerCase() === ipInfo.city?.toLowerCase(),
             );
             if (!knownCity) {
-              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CITY; 
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CITY;
             }
           }
           if (ipInfo.regionName) {
@@ -194,7 +195,7 @@ export class SecurityService {
                 ipInfo.regionName?.toLowerCase(),
             );
             if (!knownRegion) {
-              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_REGION; 
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_REGION;
             }
           }
         }
@@ -202,10 +203,10 @@ export class SecurityService {
 
       // 2.4 Network Anomalies (VPN, Proxy, Data Center)
       if (ipInfo.proxy) {
-        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VPN_OR_PROXY_DETECTED; 
+        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VPN_OR_PROXY_DETECTED;
       }
       if (ipInfo.hosting) {
-        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.DATA_CENTER_IP; 
+        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.DATA_CENTER_IP;
       }
 
       // 2.5 Change in ISP or Autonomous System (ASN)
@@ -216,7 +217,7 @@ export class SecurityService {
             (ipInfo.isp && log.isp === ipInfo.isp),
         );
         if (!knownNetwork) {
-          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_ASN_OR_ISP; 
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_ASN_OR_ISP;
         }
       }
     }
@@ -233,7 +234,7 @@ export class SecurityService {
           clientTimezone.trim().toLowerCase() !==
           ipInfo.timezone.trim().toLowerCase()
         ) {
-          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.TIMEZONE_MISMATCH; 
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.TIMEZONE_MISMATCH;
         }
       } else if (authLogs.length > 0) {
         const knownTimezone = authLogs.some(
@@ -241,7 +242,7 @@ export class SecurityService {
             log.timezone?.toLowerCase() === ipInfo.timezone.toLowerCase(),
         );
         if (!knownTimezone) {
-          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.TIMEZONE_MISMATCH; 
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.TIMEZONE_MISMATCH;
         }
       }
     }
@@ -323,26 +324,6 @@ export class SecurityService {
       }
     }
     return date.getHours();
-  }
-
-  // Distance Calculation using the Haversine Formula (in km)
-  private calculateHaversineDistance(
-    lat1: number,
-    lon1: number,
-    lat2: number,
-    lon2: number,
-  ): number {
-    const R = 6371;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
   }
 
   // Create confirmation record and send confirmation letter via email
