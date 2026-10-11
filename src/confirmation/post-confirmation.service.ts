@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { Prisma, User } from 'generated/prisma';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { IPService } from 'src/shared/ip/ip.service';
 import { TokenService } from 'src/shared/token/token.service';
+import type RequestWithId from 'src/common/entities/IRequestWithId';
 
 @Injectable()
 export class PostConfirmationService {
@@ -17,7 +18,6 @@ export class PostConfirmationService {
   async handleEmailVerification(
     id: string,
     response: Response,
-    request: Request,
     tx?: Prisma.TransactionClient,
   ): Promise<{ message: string }> {
     const prisma = tx ?? this.prisma; // Use tx(transaction prisma model) or prismaService
@@ -39,7 +39,7 @@ export class PostConfirmationService {
   async handleTwoFactorAuthorization(
     id: string,
     response: Response,
-    request: Request,
+    request: RequestWithId,
     tx?: Prisma.TransactionClient,
   ): Promise<{ message: string }> {
     const prisma = tx ?? this.prisma; // Use tx(transaction prisma model) or prismaService
@@ -49,15 +49,35 @@ export class PostConfirmationService {
       return this.authorizeUser(user, response); // Create and set auth cookies
     }
 
+    // 1. Link new IP in AuthLog
     const ipInfo = await this.ipService.getInfoFromIp(request);
-    const isApiLinked = await prisma.authLog.findFirst({
-      where: { userId: id, ip: ipInfo?.ip },
-    });
 
-    if (ipInfo && !isApiLinked) {
-      await prisma.authLog.create({
-        data: { userId: id, ...ipInfo },
+    if (ipInfo) {
+      const isApiLinked = await prisma.authLog.findFirst({
+        where: { userId: id, ip: ipInfo.ip },
       });
+
+      if (!isApiLinked) {
+        await prisma.authLog.create({
+          data: { userId: id, ...ipInfo },
+        });
+      }
+    }
+
+    // 2. Add current device to TrustedDevice
+    const visitorId =
+      (request as RequestWithId).visitorId ||
+      (request.headers['x-visitor-id'] as string);
+
+    if (visitorId) {
+      const isDeviceLinked = await prisma.trustedDevice.findFirst({
+        where: { userId: id, visitorId },
+      });
+      if (!isDeviceLinked) {
+        await prisma.trustedDevice.create({
+          data: { userId: id, visitorId },
+        });
+      }
     }
 
     return this.authorizeUser(user, response); // Create and set auth cookies

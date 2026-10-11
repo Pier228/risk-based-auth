@@ -7,11 +7,8 @@ import { PrismaService } from 'src/prisma-database/prisma.service';
 import RequestWithId from 'src/common/entities/IRequestWithId';
 import { User } from 'generated/prisma';
 import { ConfirmationService } from 'src/confirmation/confirmation.service';
-import { LETTER_TEMPLATES } from 'src/common/globals';
-import { Request } from 'express';
-import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
+import { LETTER_TEMPLATES, RISK_BASED_AUTH_CONFIG } from 'src/common/globals';
 import { IPService } from 'src/shared/ip/ip.service';
-import type IIpInfo from 'src/shared/ip/entities/IIpInfo';
 
 @Injectable()
 export class SecurityService {
@@ -19,38 +16,40 @@ export class SecurityService {
     private readonly prismaService: PrismaService,
     private readonly confirmationService: ConfirmationService,
     private readonly ipService: IPService,
-    private readonly bcryptService: BcryptService,
   ) {}
 
   // Enable/Disable Two Factor Authentication for user
   async toggleTwoFactorAuth(req: RequestWithId): Promise<{ message: string }> {
     const { id, visitorId } = req;
-
     const user = await this.findUserById(id); // Find user by id
     const twoFactorAuthEnabled = user.twoFactorAuthEnabled;
 
     await this.prismaService
       .$transaction(async (tx) => {
-        const user = await tx.user.update({
+        const updatedUser = await tx.user.update({
           where: { id },
           data: {
             twoFactorAuthEnabled: !twoFactorAuthEnabled,
           },
         });
 
-        if (user.twoFactorAuthEnabled) {
+        if (updatedUser.twoFactorAuthEnabled) {
           const ipInfo = await this.ipService.getInfoFromIp(req);
-
-          await tx.authLog.create({
-            data: { userId: id, ...ipInfo },
-          });
-          if (visitorId) {
-            await tx.trustedDevice.create({
-              data: {
-                userId: id,
-                visitorId: await this.bcryptService.hash(visitorId),
-              },
+          if (ipInfo) {
+            await tx.authLog.create({
+              data: { userId: id, ...ipInfo },
             });
+          }
+
+          if (visitorId) {
+            const existingDevice = await tx.trustedDevice.findFirst({
+              where: { userId: id, visitorId },
+            });
+            if (!existingDevice) {
+              await tx.trustedDevice.create({
+                data: { userId: id, visitorId },
+              });
+            }
           }
         } else {
           await tx.authLog.deleteMany({ where: { userId: id } });
@@ -68,46 +67,181 @@ export class SecurityService {
     };
   }
 
+  // Risk-based adaptive 2FA verification
   async twoFactorAuth(
     user: User,
-    req: Request,
+    req: RequestWithId,
   ): Promise<true | { message: string; confirmationId: string }> {
+    const visitorId =
+      (req as RequestWithId).visitorId ||
+      (req.headers['x-visitor-id'] as string) ||
+      null;
+
     const ipInfo = await this.ipService.getInfoFromIp(req);
-    // const visitorId = await this.prismaService.trustedDevice.findFirst({
-    //   where: { userId: user.id, visitorId:  },
-    // });
-    // return this.verifyAuth(ipInfo, user, visitorId);
+
+    const [trustedDevices, authLogs] = await Promise.all([
+      this.prismaService.trustedDevice.findMany({
+        where: { userId: user.id },
+      }),
+      this.prismaService.authLog.findMany({
+        where: { userId: user.id },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ]);
+
+    let riskScore = 0;
+
+    // Browser Fingerprint
+    let isDeviceTrusted = false;
+    if (visitorId && trustedDevices.length > 0) {
+      for (const dev of trustedDevices) {
+        if (dev.visitorId === visitorId) {
+          isDeviceTrusted = true;
+          break;
+        }
+      }
+    }
+
+    if (!isDeviceTrusted) {
+      riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VISITOR_ID_MISMATCH; // +30
+    }
+
+    // 2. IP & Geolocation Analysis
+    if (ipInfo) {
+      // 2.1 Impossible Travel Check against the Last Recorded Sign-In
+      if (authLogs.length > 0 && ipInfo.lat != null && ipInfo.lon != null) {
+        const latestLog = authLogs[0];
+        if (latestLog.lat != null && latestLog.lon != null) {
+          const timeDiffHours =
+            (Date.now() - new Date(latestLog.createdAt).getTime()) /
+            (1000 * 60 * 60);
+          const minIntervalHours =
+            RISK_BASED_AUTH_CONFIG.VELOCITY_LIMITS.MIN_TIME_INTERVAL_SECONDS /
+            3600;
+
+          if (timeDiffHours >= minIntervalHours) {
+            const distanceKm = this.calculateHaversineDistance(
+              latestLog.lat,
+              latestLog.lon,
+              ipInfo.lat,
+              ipInfo.lon,
+            );
+            const speedKmh = distanceKm / timeDiffHours;
+            if (
+              speedKmh >
+              RISK_BASED_AUTH_CONFIG.VELOCITY_LIMITS.MAX_REALISTIC_SPEED_KMH
+            ) {
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.IMPOSSIBLE_TRAVEL; // +100
+            }
+          }
+        }
+      }
+
+      // 2.2 Continent Check
+      if (authLogs.length > 0 && ipInfo.continent) {
+        const knownContinent = authLogs.some(
+          (log) =>
+            log.continent?.toLowerCase() === ipInfo.continent?.toLowerCase(),
+        );
+        if (!knownContinent) {
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CONTINENT; // +40
+        }
+      }
+
+      // 2.3 Country and City Check
+      if (authLogs.length > 0 && ipInfo.country) {
+        const knownCountry = authLogs.some(
+          (log) => log.country?.toLowerCase() === ipInfo.country?.toLowerCase(),
+        );
+        if (!knownCountry) {
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_COUNTRY; // +35
+        } else {
+          // If country is recognized — verify city and region
+          if (ipInfo.city) {
+            const knownCity = authLogs.some(
+              (log) => log.city?.toLowerCase() === ipInfo.city?.toLowerCase(),
+            );
+            if (!knownCity) {
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_CITY; // +15
+            }
+          }
+          if (ipInfo.regionName) {
+            const knownRegion = authLogs.some(
+              (log) =>
+                log.regionName?.toLowerCase() ===
+                ipInfo.regionName?.toLowerCase(),
+            );
+            if (!knownRegion) {
+              riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_REGION; // +10
+            }
+          }
+        }
+      }
+
+      // 2.4 Network Anomalies (VPN, Proxy, Data Center)
+      if (ipInfo.proxy) {
+        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.VPN_OR_PROXY_DETECTED; // +30
+      }
+      if (ipInfo.hosting) {
+        riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.DATA_CENTER_IP; // +40
+      }
+
+      // 2.5 Change in ISP or Autonomous System (ASN)
+      if (authLogs.length > 0 && (ipInfo.as || ipInfo.isp)) {
+        const knownNetwork = authLogs.some(
+          (log) =>
+            (ipInfo.as && log.as === ipInfo.as) ||
+            (ipInfo.isp && log.isp === ipInfo.isp),
+        );
+        if (!knownNetwork) {
+          riskScore += RISK_BASED_AUTH_CONFIG.PENALTIES.NEW_ASN_OR_ISP; // +15
+        }
+      }
+    }
+
+    // 3. Decision Making: If the risk score exceeds the security threshold - trigger 2FA
+    if (riskScore > RISK_BASED_AUTH_CONFIG.THRESHOLDS.LOW_RISK_MAX) {
+      return this.sendTwoFactorAuthConfirmation(user.id, user.email);
+    }
+
+    // 4. Low Risk: Update the IP record in AuthLog
+    if (ipInfo) {
+      await this.prismaService.authLog
+        .upsert({
+          where: {
+            userId_ip: {
+              userId: user.id,
+              ip: ipInfo.ip,
+            },
+          },
+          update: { ...ipInfo },
+          create: { userId: user.id, ...ipInfo },
+        })
+        .catch(() => null);
+    }
+  
     return true;
   }
 
-  // Checks if the sign-in allowed
-  // private async verifyAuth(
-  //   ipInfo: IIpInfo | null,
-  //   { id, email }: User,
-  //   visitorId: { visitorId: string } | null,
-  // ): Promise<true | { message: string; confirmationId: string }> {
-  //   // Case 1: country = null & no previous 2FA country
-  //   if (!ipInfo && !twoFactorCountry) return true; // Authorization allowed
-
-  //   // Case 2: country = null & 2FA country exists -> suspicious
-  //   if (!ipInfo && twoFactorCountry)
-  //     // Create confirmation record && send token via email sender
-  //     return this.sendTwoFactorAuthConfirmation(id, email); // Authorization not allowed
-
-  //   // Case 3: country provided, but no stored 2FA country -> set it
-  //   if (ipInfo && !twoFactorCountry) {
-  //     const hashedCountry = await this.bcryptService.hash(ipInfo); // Get hashed country
-  //     await this.prismaService.user.update({
-  //       where: { id },
-  //       data: { twoFactorCountry: hashedCountry },
-  //     }); // Change user's two-factor auth country
-  //     return true; // Authorization allowed
-  //   }
-
-  //   // Case 4: country provided, 2FA country exists -> compare
-  //   const isMatch = await this.bcryptService.compare(ipInfo, twoFactorCountry); // Compare countries via bcrypt
-  //   return isMatch ? true : this.sendTwoFactorAuthConfirmation(id, email);
-  // }
+  // Distance Calculation using the Haversine Formula (in km)
+  private calculateHaversineDistance(
+    lat1: number,
+    lon1: number,
+    lat2: number,
+    lon2: number,
+  ): number {
+    const R = 6371;
+    const dLat = ((lat2 - lat1) * Math.PI) / 180;
+    const dLon = ((lon2 - lon1) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos((lat2 * Math.PI) / 180) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+  }
 
   // Create confirmation record and send confirmation letter via email
   private async sendTwoFactorAuthConfirmation(

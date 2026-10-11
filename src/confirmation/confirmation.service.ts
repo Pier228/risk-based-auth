@@ -10,7 +10,7 @@ import { Confirmation, ConfirmationType, Prisma } from 'generated/prisma';
 import { EmailSenderService } from 'src/shared/email-sender/email-sender.service';
 import type ICreateConfirmation from './entities/ICreateConfirmation';
 import VerifyConfirmationDTO from './dto/verify.confirmation.dto';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { PostConfirmationService } from './post-confirmation.service';
 import {
   CONFIRMATION_CONFIG,
@@ -19,6 +19,7 @@ import {
 } from 'src/common/globals';
 import type ICreateAndSendConfirmation from './entities/ICreateAndSendConfirmation';
 import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
+import type RequestWithId from 'src/common/entities/IRequestWithId';
 
 @Injectable()
 export class ConfirmationService {
@@ -33,7 +34,7 @@ export class ConfirmationService {
   async handleConfirmation(
     { confirmationId, token }: VerifyConfirmationDTO,
     response: Response,
-    request: Request,
+    request: RequestWithId,
   ) {
     return this.prisma.$transaction(async (tx) => {
       // Verify confirmation
@@ -49,7 +50,6 @@ export class ConfirmationService {
           return this.postConfirmationService.handleEmailVerification(
             userId,
             response,
-            request,
             tx,
           );
 

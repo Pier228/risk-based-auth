@@ -5,7 +5,8 @@ import { ResendConfirmationSwaggerDocs } from './swagger/resend-confirmation-doc
 import VerifyConfirmationDTO from './dto/verify.confirmation.dto';
 import ResendConfirmationDTO from './dto/resend.confirmation.dto';
 import { VerifyConfirmationSwaggerDocs } from './swagger/verify-confirmation-doc.decorator';
-import { Request, Response } from 'express';
+import { Response } from 'express';
+import type RequestWithId from 'src/common/entities/IRequestWithId';
 
 @Controller('confirmation')
 export class ConfirmationController {
@@ -17,7 +18,7 @@ export class ConfirmationController {
   async handleConfirmation(
     @Body() body: VerifyConfirmationDTO,
     @Res({ passthrough: true }) response: Response,
-    @Req() req: Request,
+    @Req() req: RequestWithId,
   ) {
     return this.confirmationService.handleConfirmation(body, response, req);
   }
