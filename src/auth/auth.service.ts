@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { JwtService } from '@nestjs/jwt';
-import { Request, Response } from 'express';
+import { Response } from 'express';
 import { BLACK_LIST_REASONS, LETTER_TEMPLATES } from 'src/common/globals';
 import { ConfirmationService } from 'src/confirmation/confirmation.service';
 import SignInDTO from './dto/sign.in.dto';
@@ -18,6 +18,7 @@ import { SecurityService } from 'src/security/security.service';
 import { User } from 'generated/prisma';
 import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
 import { TokenService } from 'src/shared/token/token.service';
+import type RequestWithId from 'src/common/entities/IRequestWithId';
 
 @Injectable()
 export class AuthService {
@@ -53,12 +54,15 @@ export class AuthService {
   async signIn(
     { email, password }: SignInDTO,
     response: Response,
-    request: Request,
+    request: RequestWithId,
   ) {
     const user = await this.prisma.user.findUnique({ where: { email } }); // Find user by email
 
     // Check if user exists and password matches
     if (!user || !(await this.bcryptService.compare(password, user.password))) {
+      if (user) {
+        await this.securityService.recordFailedLoginAttempt(user.id);
+      }
       throw new UnauthorizedException('Wrong email or password');
     }
 
@@ -68,11 +72,14 @@ export class AuthService {
     }
 
     // Two factor auth
-    user.twoFactorAuthEnabled &&
-      (await this.twoFactorAuthSecurity(user, request));
+    if (user.twoFactorAuthEnabled) {
+      await this.twoFactorAuthSecurity(user, request);
+    }
+
+    // Successful sign-in without 2FA (or after completing it) resets the failed attempt counter
+    await this.securityService.clearFailedLoginAttempts(user.id);
 
     await this.tokenService.setAuthCookies(user, response); // Create and set auth cookies
-
     return { message: 'User successfully logged in' };
   }
 
@@ -181,7 +188,7 @@ export class AuthService {
   // Verify user's authorization via 2FA, if failed -> throw exception
   private async twoFactorAuthSecurity(
     user: User,
-    request: Request,
+    request: RequestWithId,
   ): Promise<void> {
     const result = await this.securityService.twoFactorAuth(user, request);
 

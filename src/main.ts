@@ -5,6 +5,7 @@ import { ValidationPipe } from '@nestjs/common';
 import helmet from 'helmet';
 import * as cookieParser from 'cookie-parser';
 import { ConfigService } from '@nestjs/config';
+import { PROXY_HEADERS } from './common/globals';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -22,6 +23,14 @@ async function bootstrap() {
     origin: configService.get('CORS_ALLOWED_ORIGIN') || '*', // Allow specified origins or all (*)
     methods: ['GET', 'POST', 'PATCH', 'DELETE'], // Allowed HTTP methods
     credentials: true, // Allows sending credentials (cookies, auth headers)
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'x-visitor-id', // Custom header for visitorId from FingerprintJS
+      'x-timezone',
+      'x-client-timezone',
+      ...PROXY_HEADERS,
+    ], // Allowed headers in requests
   });
 
   app.use(cookieParser(configService.getOrThrow('COOKIE_SECRET')));
