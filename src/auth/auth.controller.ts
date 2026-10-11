@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Res, Req } from '@nestjs/common';
+import { Controller, Post, Body, Res, Req, Patch } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { Throttle } from '@nestjs/throttler';
 import { ApiTags } from '@nestjs/swagger';
@@ -9,6 +9,8 @@ import type RequestWithId from 'src/common/entities/IRequestWithId';
 import { SignOutSwaggerDocs } from './swagger/sign-out-doc.decorator';
 import SignInDTO from './dto/sign.in.dto';
 import SignUpDTO from './dto/sign.up.dto';
+import ChangePasswordDTO from './dto/change.password.dto';
+import { ChangePasswordSwaggerDocs } from './swagger/change-password-doc.decorator';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -40,5 +42,22 @@ export class AuthController {
     @Res({ passthrough: true }) response: Response,
   ) {
     return this.authService.signOut(signedCookies, response);
+  }
+
+  @ChangePasswordSwaggerDocs()
+  @Throttle({ default: { limit: 5, ttl: 5 * 60 * 1000 } }) // 5 requests per 5 minutes
+  @Patch('change-password')
+  async changePassword(
+    @Req() req: RequestWithId,
+    @Body() passwords: ChangePasswordDTO,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const currentAccessToken = req.signedCookies?.['access_token'];
+    return this.authService.changePassword(
+      req.id!,
+      passwords,
+      response,
+      currentAccessToken,
+    );
   }
 }

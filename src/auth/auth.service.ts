@@ -1,8 +1,10 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { PrismaService } from 'src/prisma-database/prisma.service';
@@ -19,6 +21,7 @@ import { User } from 'generated/prisma';
 import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
 import { TokenService } from 'src/shared/token/token.service';
 import type RequestWithId from 'src/common/entities/IRequestWithId';
+import ChangePasswordDTO from './dto/change.password.dto';
 
 @Injectable()
 export class AuthService {
@@ -118,6 +121,79 @@ export class AuthService {
     }
 
     return { message: 'Successfully signed out' };
+  }
+
+  // Change user password, invalidate all existing sessions and issue new tokens
+  async changePassword(
+    userId: string,
+    { currentPassword, newPassword }: ChangePasswordDTO,
+    response: Response,
+    currentAccessToken?: string,
+  ): Promise<{ message: string }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    // 1. Verify current password
+    const isCurrentPasswordValid = await this.bcryptService.compare(
+      currentPassword,
+      user.password,
+    );
+
+    if (!isCurrentPasswordValid) {
+      throw new BadRequestException('Incorrect current password');
+    }
+
+    // 2. Prevent reusing the same password
+    if (currentPassword === newPassword) {
+      throw new BadRequestException(
+        'New password must be different from current password',
+      );
+    }
+
+    // 3. Hash new password
+    const hashedPassword = await this.bcryptService.hash(newPassword);
+
+    // 4. Update password and invalidate ALL existing refresh tokens in DB
+    await this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: { password: hashedPassword },
+      });
+
+      // Invalidate all active sessions across all devices
+      await tx.token.deleteMany({
+        where: { userId },
+      });
+    });
+
+    // 5. Blacklist current access token in Redis (mitigate stolen token replay attacks)
+    if (currentAccessToken) {
+      const decoded = this.jwtService.decode(currentAccessToken) as {
+        exp?: number;
+      } | null;
+
+      if (decoded?.exp) {
+        const ttl = decoded.exp * 1000 - Date.now();
+        if (ttl > 0) {
+          await this.cacheManager.set(
+            currentAccessToken,
+            {
+              blockedAt: Date.now(),
+              reason: 'password_changed',
+            },
+            ttl,
+          );
+        }
+      }
+    }
+
+    // 6. Issue a new token pair in cookies for the current user
+    await this.tokenService.setAuthCookies(user, response);
+
+    return { message: 'Password has been successfully changed' };
   }
 
   // Check is the registration allowed for this email address
