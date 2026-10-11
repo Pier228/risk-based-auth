@@ -1,23 +1,23 @@
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { AppModule } from 'src/app.module';
 import { ThrottlerStorage } from '@nestjs/throttler';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
+import request from 'supertest';
 import { CONFIRMATION_CONFIG } from 'src/common/globals';
 import { ConfigService } from '@nestjs/config';
 import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
-import { BcryptModule } from 'src/shared/bcrypt/bcrypt.module';
+import { EmailSenderService } from 'src/shared/email-sender/email-sender.service';
 
-describe('Confirmation Controller (e2e)', () => {
+describe('Confirmation Resend (e2e)', () => {
   let app: INestApplication;
   let prismaService: PrismaService;
   let bcryptService: BcryptService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [AppModule, BcryptModule],
+      imports: [AppModule],
     })
       .overrideProvider(ThrottlerStorage)
       .useValue({
@@ -25,12 +25,17 @@ describe('Confirmation Controller (e2e)', () => {
           .fn()
           .mockResolvedValue({ totalHits: 0, timeToExpire: 0 }),
       })
+      .overrideProvider(EmailSenderService)
+      .useValue({
+        sendEmail: jest.fn().mockResolvedValue({
+          message: 'Email has been sent',
+          response: { Messages: [{ Status: 'success' }] },
+        }),
+      })
       .compile();
 
     app = moduleRef.createNestApplication();
-
     const configService = app.get(ConfigService);
-
     app.useGlobalPipes(
       new ValidationPipe({ transform: true, whitelist: true }),
     );
@@ -40,15 +45,18 @@ describe('Confirmation Controller (e2e)', () => {
       credentials: true,
     });
     app.use(cookieParser(configService.getOrThrow('COOKIE_SECRET')));
-
     bcryptService = moduleRef.get<BcryptService>(BcryptService);
     prismaService = moduleRef.get<PrismaService>(PrismaService);
     await app.init();
   });
 
   const clearDB = async () => {
-    await prismaService.user.deleteMany();
+    await prismaService.trustedDevice.deleteMany();
+    await prismaService.authLog.deleteMany();
     await prismaService.confirmation.deleteMany();
+    await prismaService.token.deleteMany();
+    await prismaService.profile.deleteMany();
+    await prismaService.user.deleteMany();
   };
 
   afterAll(async () => {
@@ -59,28 +67,20 @@ describe('Confirmation Controller (e2e)', () => {
   beforeEach(async () => await clearDB());
 
   describe('/confirmation/resend (POST)', () => {
-    it('should return code 400 & validation error', async () => {
-      const invalidData = [
-        { confirmationId: '123213' },
-        { confirmationId: 12312312 },
-        { confirmationId: '' },
-      ];
-
-      for (const data of invalidData) {
+    it('should return 400 on invalid confirmationId UUID format', async () => {
+      const invalidIds = ['123', 'invalid-uuid-string', ''];
+      for (const confirmationId of invalidIds) {
         const response = await request(app.getHttpServer())
           .post('/confirmation/resend')
-          .send(data)
+          .send({ confirmationId })
           .expect(400);
 
-        expect(response.body).toEqual({
-          statusCode: 400,
-          error: 'Bad Request',
-          message: expect.any(Array || String),
-        });
+        expect(response.body.statusCode).toBe(400);
+        expect(response.body.error).toBe('Bad Request');
       }
     });
 
-    it('should return http code 404 & NotFoundException', async () => {
+    it('should return 404 if confirmation record does not exist', async () => {
       const response = await request(app.getHttpServer())
         .post('/confirmation/resend')
         .send({ confirmationId: crypto.randomUUID() })
@@ -93,32 +93,32 @@ describe('Confirmation Controller (e2e)', () => {
       });
     });
 
-    it('should return http code 400 & BadRequestException (not enough time has passed)', async () => {
-      const { id } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
+    it('should return 400 if resend threshold has not passed yet (Rate Limit by time)', async () => {
+      const user = await prismaService.user.create({
+        data: {
+          email: 'spam-protection@gmail.com',
+          password: 'password123',
+          Profile: {
+            create: { name: 'Alex', surname: 'Smith' },
           },
-        });
+        },
+      });
 
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash('123321'),
-            expiresAt: new Date(
-              Date.now() + CONFIRMATION_CONFIG.VERIFICATION_TIME,
-            ),
-            type: 'EMAIL_VERIFICATION',
-          },
-        });
-
-        return { id };
+      const confirmation = await prismaService.confirmation.create({
+        data: {
+          userId: user.id,
+          token: await bcryptService.hash('123456'),
+          type: 'EMAIL_VERIFICATION',
+          expiresAt: new Date(
+            Date.now() + CONFIRMATION_CONFIG.VERIFICATION_TIME,
+          ),
+          createdAt: new Date(),
+        },
       });
 
       const response = await request(app.getHttpServer())
         .post('/confirmation/resend')
-        .send({ confirmationId: id })
+        .send({ confirmationId: confirmation.id })
         .expect(400);
 
       expect(response.body).toEqual({
@@ -131,61 +131,49 @@ describe('Confirmation Controller (e2e)', () => {
       });
     });
 
-    it('should return http code 201 & confirmation letter has been resend', async () => {
-      const token = '543765';
-      const { id, user } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
+    it('should return 201, delete old confirmation and issue a new one when threshold has passed', async () => {
+      const user = await prismaService.user.create({
+        data: {
+          email: 'resend-allowed@gmail.com',
+          password: 'password123',
+          Profile: {
+            create: { name: 'Artem', surname: 'Bukhanenko' },
           },
-        });
+        },
+      });
 
-        await tx.profile.create({
-          data: {
-            name: Date.now().toString(),
-            surname: Date.now().toString(),
-            userId: user.id,
-          },
-        });
-
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash(token),
-            expiresAt: new Date(
-              Date.now() - CONFIRMATION_CONFIG.VERIFICATION_TIME,
-            ),
-            createdAt: new Date(
-              Date.now() - CONFIRMATION_CONFIG.VERIFICATION_TIME,
-            ),
-            type: 'EMAIL_VERIFICATION',
-          },
-        });
-
-        return { id, user };
+      const oldConfirmation = await prismaService.confirmation.create({
+        data: {
+          userId: user.id,
+          token: await bcryptService.hash('111222'),
+          type: 'EMAIL_VERIFICATION',
+          expiresAt: new Date(Date.now() + 1000 * 60 * 10),
+          createdAt: new Date(
+            Date.now() - (CONFIRMATION_CONFIG.RESEND_THRESHOLD + 10000),
+          ),
+        },
       });
 
       const response = await request(app.getHttpServer())
         .post('/confirmation/resend')
-        .send({ confirmationId: id })
+        .send({ confirmationId: oldConfirmation.id })
         .expect(201);
 
       expect(response.body).toEqual({
         message: 'Confirmation letter has been successfully sent',
         confirmationId: expect.any(String),
       });
-      expect(response.body.confirmationId).toHaveLength(36);
+      expect(response.body.confirmationId).not.toBe(oldConfirmation.id);
 
-      const { emailConfirmed, Confirmation } =
-        await prismaService.user.findUnique({
-          where: { id: user.id },
-          include: { Confirmation: true },
-        });
+      const oldCheck = await prismaService.confirmation.findUnique({
+        where: { id: oldConfirmation.id },
+      });
+      const newCheck = await prismaService.confirmation.findUnique({
+        where: { id: response.body.confirmationId },
+      });
 
-      expect(emailConfirmed).toBeFalsy();
-      expect(Confirmation).toHaveLength(1);
-      expect(Confirmation[0].id).not.toBe(id);
+      expect(oldCheck).toBeNull();
+      expect(newCheck).toBeTruthy();
     });
   });
 });

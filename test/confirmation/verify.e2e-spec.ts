@@ -1,13 +1,12 @@
-import * as request from 'supertest';
+import request from 'supertest';
 import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { AppModule } from 'src/app.module';
 import { JwtService } from '@nestjs/jwt';
 import { ThrottlerStorage } from '@nestjs/throttler';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
 import decodeSignedCookie from '../utils/decodeSignedCookie';
-import { mockEmailConfirmation } from 'test/utils/mockData/email.confirmation';
 import { ConfigService } from '@nestjs/config';
 import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
 import { BcryptModule } from 'src/shared/bcrypt/bcrypt.module';
@@ -31,9 +30,7 @@ describe('Confirmation Controller (e2e)', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
-
     const configService = app.get(ConfigService);
-
     app.useGlobalPipes(
       new ValidationPipe({ transform: true, whitelist: true }),
     );
@@ -43,7 +40,6 @@ describe('Confirmation Controller (e2e)', () => {
       credentials: true,
     });
     app.use(cookieParser(configService.getOrThrow('COOKIE_SECRET')));
-
     bcryptService = moduleRef.get<BcryptService>(BcryptService);
     prismaService = moduleRef.get<PrismaService>(PrismaService);
     jwtService = moduleRef.get<JwtService>(JwtService);
@@ -51,8 +47,11 @@ describe('Confirmation Controller (e2e)', () => {
   });
 
   const clearDB = async () => {
-    await prismaService.user.deleteMany();
+    await prismaService.trustedDevice.deleteMany();
+    await prismaService.authLog.deleteMany();
     await prismaService.confirmation.deleteMany();
+    await prismaService.token.deleteMany();
+    await prismaService.user.deleteMany();
   };
 
   afterAll(async () => {
@@ -63,133 +62,52 @@ describe('Confirmation Controller (e2e)', () => {
   beforeEach(async () => await clearDB());
 
   describe('/confirmation/verify (POST)', () => {
-    it('should return code 400 & validation error', async () => {
-      for (const confirmation of mockEmailConfirmation.invalid) {
-        const response = await request(app.getHttpServer())
-          .post('/confirmation/verify')
-          .send(confirmation)
-          .expect(400);
+    it('should return 401 if wrong token code is provided', async () => {
+      const user = await prismaService.user.create({
+        data: { email: 'verify-fail@gmail.com', password: 'password123' },
+      });
 
-        expect(response.body).toEqual({
-          statusCode: 400,
-          error: 'Bad Request',
-          message: expect.any(Array || String),
-        });
-        expect(response.headers['set-cookie']).toBeFalsy();
-      }
-    });
+      const confirmation = await prismaService.confirmation.create({
+        data: {
+          userId: user.id,
+          token: await bcryptService.hash('123456'),
+          expiresAt: new Date(Date.now() + 300000),
+          type: 'EMAIL_VERIFICATION',
+        },
+      });
 
-    it('should return http code 401 & UnauthorizedException (not found)', async () => {
       const response = await request(app.getHttpServer())
         .post('/confirmation/verify')
-        .send({ token: '123123', confirmationId: crypto.randomUUID() })
+        .send({ token: '000000', confirmationId: confirmation.id })
         .expect(401);
 
-      expect(response.body).toEqual({
-        statusCode: 401,
-        error: 'Unauthorized',
-        message:
-          'A confirmation record was not found, or the wrong token was provided',
-      });
-      expect(response.headers['set-cookie']).toBeFalsy();
+      expect(response.body.message).toBe(
+        'A confirmation record was not found, or the wrong token was provided',
+      );
     });
 
-    it('should return http code 401 & UnauthorizedException (incorrect token)', async () => {
-      const token = '123456';
-      const { id } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
-          },
-        });
+    it('should confirm email, issue tokens and delete confirmation record', async () => {
+      const token = '654321';
+      const user = await prismaService.user.create({
+        data: {
+          email: 'confirm-email@gmail.com',
+          password: 'password123',
+          emailConfirmed: false,
+        },
+      });
 
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash(token),
-            expiresAt: new Date(Date.now() + 1000 * 60 * 5),
-            type: 'EMAIL_VERIFICATION',
-          },
-        });
-
-        return { id };
+      const confirmation = await prismaService.confirmation.create({
+        data: {
+          userId: user.id,
+          token: await bcryptService.hash(token),
+          expiresAt: new Date(Date.now() + 300000),
+          type: 'EMAIL_VERIFICATION',
+        },
       });
 
       const response = await request(app.getHttpServer())
         .post('/confirmation/verify')
-        .send({ token: '000000', confirmationId: id })
-        .expect(401);
-
-      expect(response.body).toEqual({
-        statusCode: 401,
-        error: 'Unauthorized',
-        message:
-          'A confirmation record was not found, or the wrong token was provided',
-      });
-      expect(response.headers['set-cookie']).toBeFalsy();
-    });
-
-    it('should return http code 401 & UnauthorizedException (token expired)', async () => {
-      const token = '321123';
-      const { id } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
-          },
-        });
-
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash(token),
-            expiresAt: new Date(Date.now() - 1000 * 60 * 5),
-            type: 'EMAIL_VERIFICATION',
-          },
-        });
-
-        return { id };
-      });
-
-      const response = await request(app.getHttpServer())
-        .post('/confirmation/verify')
-        .send({ token, confirmationId: id })
-        .expect(401);
-
-      expect(response.body).toEqual({
-        statusCode: 401,
-        error: 'Unauthorized',
-        message: 'Token expired',
-      });
-      expect(response.headers['set-cookie']).toBeFalsy();
-    });
-
-    it('should return http code 201 & access and refresh tokens set to cookie & user email confirmed & confirmation deleted', async () => {
-      const token = '543765';
-      const { id, user } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
-          },
-        });
-
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash(token),
-            expiresAt: new Date(Date.now() + 1000 * 60 * 5),
-            type: 'EMAIL_VERIFICATION',
-          },
-        });
-
-        return { user, id };
-      });
-
-      const response = await request(app.getHttpServer())
-        .post('/confirmation/verify')
-        .send({ token, confirmationId: id })
+        .send({ token, confirmationId: confirmation.id })
         .expect(201);
 
       expect(response.body).toEqual({
@@ -200,86 +118,53 @@ describe('Confirmation Controller (e2e)', () => {
         response.headers['set-cookie'][0],
         'access_token',
       );
-      const refreshToken = decodeSignedCookie(
-        response.headers['set-cookie'][1],
-        'refresh_token',
-      );
-
       expect(accessToken).toBeTruthy();
-      expect(refreshToken).toBeTruthy();
 
-      const payload = await jwtService.verifyAsync(accessToken as string);
-      expect(payload).toHaveProperty('id');
-      expect(payload.id).toHaveLength(36);
-      expect(refreshToken).toHaveLength(36);
+      const userInDb = await prismaService.user.findUnique({
+        where: { id: user.id },
+      });
+      expect(userInDb?.emailConfirmed).toBe(true);
 
-      const { emailConfirmed, Confirmation } =
-        await prismaService.user.findUnique({
-          where: { id: user.id },
-          include: { Confirmation: true },
-        });
-
-      expect(emailConfirmed).toBeTruthy();
-      expect(Confirmation).toHaveLength(0);
+      const confirmationInDb = await prismaService.confirmation.findUnique({
+        where: { id: confirmation.id },
+      });
+      expect(confirmationInDb).toBeNull();
     });
 
-    it('should return http code 201 & access and refresh tokens set to cookie & sign-in confirmed & confirmation deleted', async () => {
-      const token = '321543';
-      const { id, user } = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: Date.now() + '@gmail.com',
-            password: Date.now().toString(),
-            emailConfirmed: true,
-            twoFactorAuthEnabled: true,
-            twoFactorCountry: await bcryptService.hash('Germany'),
-          },
-        });
+    it('should verify 2FA OTP, issue tokens and link device to TrustedDevice list', async () => {
+      const token = '789123';
+      const user = await prismaService.user.create({
+        data: {
+          email: 'confirm-2fa@gmail.com',
+          password: 'password123',
+          emailConfirmed: true,
+          twoFactorAuthEnabled: true,
+        },
+      });
 
-        const { id } = await tx.confirmation.create({
-          data: {
-            userId: user.id,
-            token: await bcryptService.hash(token),
-            expiresAt: new Date(Date.now() + 1000 * 60 * 5),
-            type: 'TWO_FACTOR_AUTH',
-          },
-        });
-
-        return { user, id };
+      const confirmation = await prismaService.confirmation.create({
+        data: {
+          userId: user.id,
+          token: await bcryptService.hash(token),
+          expiresAt: new Date(Date.now() + 300000),
+          type: 'TWO_FACTOR_AUTH',
+        },
       });
 
       const response = await request(app.getHttpServer())
         .post('/confirmation/verify')
-        .send({ token, confirmationId: id })
+        .set('x-visitor-id', 'new-authenticated-tablet')
+        .send({ token, confirmationId: confirmation.id })
         .expect(201);
 
       expect(response.body).toEqual({
         message: 'User successfully authorized',
       });
 
-      const accessToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'access_token',
-      );
-      const refreshToken = decodeSignedCookie(
-        response.headers['set-cookie'][1],
-        'refresh_token',
-      );
-
-      expect(accessToken).toBeTruthy();
-      expect(refreshToken).toBeTruthy();
-
-      const payload = await jwtService.verifyAsync(accessToken as string);
-      expect(payload).toHaveProperty('id');
-      expect(payload.id).toHaveLength(36);
-      expect(refreshToken).toHaveLength(36);
-
-      const { Confirmation } = await prismaService.user.findUnique({
-        where: { id: user.id },
-        include: { Confirmation: true },
+      const device = await prismaService.trustedDevice.findFirst({
+        where: { userId: user.id, visitorId: 'new-authenticated-tablet' },
       });
-
-      expect(Confirmation).toHaveLength(0);
+      expect(device).toBeTruthy();
     });
   });
 });

@@ -1,18 +1,22 @@
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import * as bcrypt from 'bcrypt';
 import { AppModule } from 'src/app.module';
 import mockUsers from '../utils/mockData/users';
 import { ThrottlerStorage } from '@nestjs/throttler';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
+import request, { Response as SuperTestResponse } from 'supertest';
 import decodeSignedCookie from '../utils/decodeSignedCookie';
 import { ConfigService } from '@nestjs/config';
+import { Cache } from 'cache-manager';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { BLACK_LIST_REASONS } from 'src/common/globals';
 
-describe('Auth Controller (e2e)', () => {
+describe('Auth Sign-Out (e2e)', () => {
   let app: INestApplication;
   let prismaService: PrismaService;
+  let cacheManager: Cache;
   let cookieSecret: string;
   let saltRounds: number;
 
@@ -29,7 +33,6 @@ describe('Auth Controller (e2e)', () => {
       .compile();
 
     app = moduleRef.createNestApplication();
-
     const configService = app.get(ConfigService);
     cookieSecret = configService.getOrThrow('COOKIE_SECRET');
     saltRounds = Number(configService.get('SALT_ROUNDS')) || 12;
@@ -45,12 +48,23 @@ describe('Auth Controller (e2e)', () => {
     app.use(cookieParser(cookieSecret));
 
     prismaService = moduleRef.get<PrismaService>(PrismaService);
+    cacheManager = moduleRef.get<Cache>(CACHE_MANAGER);
     await app.init();
   });
 
   const clearDB = async () => {
-    await prismaService.user.deleteMany();
+    await prismaService.trustedDevice.deleteMany();
+    await prismaService.authLog.deleteMany();
+    await prismaService.confirmation.deleteMany();
     await prismaService.token.deleteMany();
+    await prismaService.profile.deleteMany();
+    await prismaService.user.deleteMany();
+  };
+
+  const getCookies = (res: SuperTestResponse): string[] => {
+    const raw = res.headers['set-cookie'];
+    if (!raw) return [];
+    return Array.isArray(raw) ? raw : [raw];
   };
 
   afterAll(async () => {
@@ -61,9 +75,8 @@ describe('Auth Controller (e2e)', () => {
   beforeEach(async () => await clearDB());
 
   describe('/auth/sign-out (POST)', () => {
-    it('should return code 201 & clear access token cookie', async () => {
+    it('should return 201, clear access_token cookie and add token to Redis blacklist', async () => {
       const { email, password } = mockUsers.validSignUpParams[0];
-
       await prismaService.user.create({
         data: {
           email,
@@ -72,37 +85,43 @@ describe('Auth Controller (e2e)', () => {
         },
       });
 
-      const res = await request(app.getHttpServer())
+      const signInRes = await request(app.getHttpServer())
         .post('/auth/sign-in')
         .send({ email, password })
         .expect(201);
 
-      expect(res.body).toEqual({
-        message: 'User successfully logged in',
-      });
-      expect(res.headers['set-cookie'].length).toBeGreaterThanOrEqual(2);
+      const cookies = getCookies(signInRes);
+      const accessCookie = cookies.find((c) => c.startsWith('access_token='));
+      expect(accessCookie).toBeTruthy();
+
+      const rawAccessToken = decodeSignedCookie(accessCookie!, 'access_token');
+      expect(rawAccessToken).toBeTruthy();
 
       const response = await request(app.getHttpServer())
         .post('/auth/sign-out')
-        .set('Cookie', res.headers['set-cookie'][0])
+        .set('Cookie', [accessCookie!])
         .expect(201);
 
       expect(response.body).toEqual({
         message: 'Successfully signed out',
       });
-      expect(response.headers['set-cookie']).toHaveLength(1);
 
-      const accessToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
+      const responseCookies = getCookies(response);
+      const clearedCookie = decodeSignedCookie(
+        responseCookies[0],
         'access_token',
       );
+      expect(clearedCookie).toBeFalsy();
 
-      expect(accessToken).toBeFalsy();
+      const blacklisted = await cacheManager.get<{ reason: string }>(
+        rawAccessToken as string,
+      );
+      expect(blacklisted).toBeTruthy();
+      expect(blacklisted?.reason).toBe(BLACK_LIST_REASONS.SIGN_OUT);
     });
 
-    it('should return code 201 & clear refresh token cookie', async () => {
+    it('should return 201, clear refresh_token cookie and remove it from DB', async () => {
       const { email, password } = mockUsers.validSignUpParams[0];
-
       await prismaService.user.create({
         data: {
           email,
@@ -111,79 +130,65 @@ describe('Auth Controller (e2e)', () => {
         },
       });
 
-      const res = await request(app.getHttpServer())
+      const signInRes = await request(app.getHttpServer())
         .post('/auth/sign-in')
         .send({ email, password })
         .expect(201);
 
-      expect(res.body).toEqual({
-        message: 'User successfully logged in',
-      });
-      expect(res.headers['set-cookie'].length).toBeGreaterThanOrEqual(2);
+      const cookies = getCookies(signInRes);
+      const refreshCookie = cookies.find((c) => c.startsWith('refresh_token='));
+      expect(refreshCookie).toBeTruthy();
+
+      const rawRefreshToken = decodeSignedCookie(
+        refreshCookie!,
+        'refresh_token',
+      );
+      expect(rawRefreshToken).toBeTruthy();
 
       const response = await request(app.getHttpServer())
         .post('/auth/sign-out')
-        .set('Cookie', res.headers['set-cookie'][1])
+        .set('Cookie', [refreshCookie!])
         .expect(201);
 
       expect(response.body).toEqual({
         message: 'Successfully signed out',
       });
-      expect(response.headers['set-cookie']).toHaveLength(1);
 
-      const refreshToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'refresh_token',
-      );
-
-      expect(refreshToken).toBeFalsy();
+      const tokenInDb = await prismaService.token.findUnique({
+        where: { id: rawRefreshToken as string },
+      });
+      expect(tokenInDb).toBeNull();
     });
 
-    it('should return http code 201 & Successfully signed out', async () => {
-      const mockConfirmedUsersWithHashedPasswords =
-        mockUsers.validSignUpParams.map(({ email, password }) => ({
+    it('should return 201 and clear both tokens simultaneously', async () => {
+      const { email, password } = mockUsers.validSignUpParams[0];
+      await prismaService.user.create({
+        data: {
           email,
           password: bcrypt.hashSync(password, saltRounds),
           emailConfirmed: true,
-        }));
-
-      await prismaService.user.createMany({
-        data: mockConfirmedUsersWithHashedPasswords,
+        },
       });
 
-      for (const user of mockUsers.validSignUpParams) {
-        const res = await request(app.getHttpServer())
-          .post('/auth/sign-in')
-          .send(user)
-          .expect(201);
+      const signInRes = await request(app.getHttpServer())
+        .post('/auth/sign-in')
+        .send({ email, password })
+        .expect(201);
 
-        expect(res.body).toEqual({
-          message: 'User successfully logged in',
-        });
+      const cookies = getCookies(signInRes);
 
-        expect(res.headers['set-cookie'].length).toBeGreaterThanOrEqual(2);
+      const response = await request(app.getHttpServer())
+        .post('/auth/sign-out')
+        .set('Cookie', cookies)
+        .expect(201);
 
-        const response = await request(app.getHttpServer())
-          .post('/auth/sign-out')
-          .set('Cookie', res.headers['set-cookie'])
-          .expect(201);
+      expect(response.body).toEqual({
+        message: 'Successfully signed out',
+      });
 
-        expect(response.body).toEqual({
-          message: 'Successfully signed out',
-        });
-
-        const accessToken = decodeSignedCookie(
-          response.headers['set-cookie'][0],
-          'access_token',
-        );
-        const refreshToken = decodeSignedCookie(
-          response.headers['set-cookie'][1],
-          'refresh_token',
-        );
-
-        expect(accessToken).toBeFalsy();
-        expect(refreshToken).toBeFalsy();
-      }
+      const cookiesOut = getCookies(response);
+      expect(decodeSignedCookie(cookiesOut[0], 'refresh_token')).toBeFalsy();
+      expect(decodeSignedCookie(cookiesOut[1], 'access_token')).toBeFalsy();
     });
   });
 });

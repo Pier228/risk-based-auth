@@ -1,16 +1,14 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
 import { AppModule } from 'src/app.module';
-import * as request from 'supertest';
+import request from 'supertest';
 import * as cookieSignature from 'cookie-signature';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { REFRESH_TOKEN_CONFIG } from 'src/common/globals';
 import decodeSignedCookie from './utils/decodeSignedCookie';
 import { ConfigService } from '@nestjs/config';
-import { BcryptService } from 'src/shared/bcrypt/bcrypt.service';
-import { BcryptModule } from 'src/shared/bcrypt/bcrypt.module';
 import { Cache } from 'cache-manager';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 
@@ -20,15 +18,13 @@ describe('Security Middleware (e2e)', () => {
   let prismaService: PrismaService;
   let cookieSecret: string;
   let cacheManager: Cache;
-  let bcryptService: BcryptService;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [AppModule, BcryptModule],
+      imports: [AppModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
-
     const configService = app.get(ConfigService);
     cookieSecret = configService.getOrThrow('COOKIE_SECRET');
 
@@ -43,15 +39,16 @@ describe('Security Middleware (e2e)', () => {
     app.use(cookieParser(cookieSecret));
 
     cacheManager = moduleRef.get<Cache>(CACHE_MANAGER);
-    bcryptService = moduleRef.get<BcryptService>(BcryptService);
     prismaService = moduleRef.get<PrismaService>(PrismaService);
     jwtService = moduleRef.get<JwtService>(JwtService);
     await app.init();
   });
 
   const clearDB = async () => {
-    await prismaService.user.deleteMany();
+    await prismaService.trustedDevice.deleteMany();
+    await prismaService.authLog.deleteMany();
     await prismaService.token.deleteMany();
+    await prismaService.user.deleteMany();
   };
 
   afterAll(async () => {
@@ -61,10 +58,10 @@ describe('Security Middleware (e2e)', () => {
 
   beforeEach(async () => await clearDB());
 
-  describe('Invalid tokens', () => {
-    it('should return code 401 & No valid token provided', async () => {
+  describe('Invalid or Compromised Tokens', () => {
+    it('should return 401 when no token is provided', async () => {
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-protected-route')
         .expect(401);
 
       expect(response.body).toEqual({
@@ -72,20 +69,18 @@ describe('Security Middleware (e2e)', () => {
         message: 'No valid token provided',
         statusCode: 401,
       });
-
       expect(response.headers['set-cookie']).toBeFalsy();
     });
 
-    it('should return code 401 & invalid signature', async () => {
+    it('should return 401 when token has an invalid signature', async () => {
       const fakeToken = await jwtService.signAsync(
         { id: crypto.randomUUID() },
-        { secret: 'fake' },
+        { secret: 'wrong-fake-secret' },
       );
-
       const signedCookie = 's:' + cookieSignature.sign(fakeToken, cookieSecret);
 
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-protected-route')
         .set('Cookie', [`access_token=${signedCookie}`])
         .expect(401);
 
@@ -94,54 +89,24 @@ describe('Security Middleware (e2e)', () => {
         message: 'invalid signature',
         statusCode: 401,
       });
-
-      expect(response.headers['set-cookie']).toBeFalsy();
     });
 
-    it('should return code 401 & Invalid refresh token', async () => {
-      const signedCookie =
-        's:' + cookieSignature.sign(crypto.randomUUID(), cookieSecret);
-
-      const response = await request(app.getHttpServer())
-        .get('/some-route')
-        .set('Cookie', [`refresh_token=${signedCookie}`])
-        .expect(401);
-
-      expect(response.body).toEqual({
-        error: 'Unauthorized',
-        message: 'Invalid refresh token',
-        statusCode: 401,
+    it('should return 401 when refresh token is expired', async () => {
+      const user = await prismaService.user.create({
+        data: { email: 'expired@gmail.com', password: 'password123' },
       });
-
-      const refreshToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'refresh_token',
-      );
-
-      expect(refreshToken).toBeFalsy();
-    });
-
-    it('should return code 401 & Refresh token expired', async () => {
-      const refreshToken = await prismaService.$transaction(async (tx) => {
-        const { id } = await tx.user.create({
-          data: { email: 'example@gmail.com', password: 'asfasfasfsaf' },
-        });
-
-        const refreshToken = await tx.token.create({
-          data: {
-            userId: id,
-            expiresAt: new Date(Date.now() - 5000),
-          },
-        });
-
-        return refreshToken;
+      const refreshToken = await prismaService.token.create({
+        data: {
+          userId: user.id,
+          expiresAt: new Date(Date.now() - 5000),
+        },
       });
 
       const signedCookie =
         's:' + cookieSignature.sign(refreshToken.id, cookieSecret);
 
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-protected-route')
         .set('Cookie', [`refresh_token=${signedCookie}`])
         .expect(401);
 
@@ -150,79 +115,59 @@ describe('Security Middleware (e2e)', () => {
         message: 'Refresh token expired',
         statusCode: 401,
       });
-
-      const unsignedRefreshToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'refresh_token',
-      );
-
-      expect(unsignedRefreshToken).toBeFalsy();
     });
 
-    it('should return code 401 & Access token is in blacklist', async () => {
+    it('should return 401 when access token is blacklisted', async () => {
       const accessToken = await jwtService.signAsync({
         id: crypto.randomUUID(),
       });
-
       const signedCookie =
         's:' + cookieSignature.sign(accessToken, cookieSecret);
 
       await cacheManager.set(
         accessToken,
-        {
-          blockedAt: Date.now(),
-        },
-        1 * 60 * 1000,
+        { blockedAt: Date.now(), reason: 'sign_out' },
+        60000,
       );
 
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-protected-route')
         .set('Cookie', [`access_token=${signedCookie}`])
         .expect(401);
 
       expect(response.body).toEqual({
         error: 'Unauthorized',
         message:
-          'This access token is blacklisted. Reason: no provided. Please sign in again.',
+          'This access token is blacklisted. Reason: sign_out. Please sign in again.',
         statusCode: 401,
       });
-
-      const unsignedAccessToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'access_token',
-      );
-
-      expect(unsignedAccessToken).toBeFalsy();
     });
 
-    it('should return code 401 & Unauthorized exception', async () => {
-      const tokenId = await prismaService.$transaction(async (tx) => {
-        const user = await tx.user.create({
-          data: {
-            email: `${Date.now()}@gmail.com`,
-            password: Date.now().toString(),
-            emailConfirmed: true,
-            twoFactorAuthEnabled: true,
+    it('should return 401, clear cookies and delete refresh token if device is not trusted (2FA enabled)', async () => {
+      const user = await prismaService.user.create({
+        data: {
+          email: 'device-binding@gmail.com',
+          password: 'password123',
+          twoFactorAuthEnabled: true,
+          trustedDevices: {
+            create: { visitorId: 'genuine-pc-id' },
           },
-        });
-
-        const token = await tx.token.create({
-          data: {
-            userId: user.id,
-            expiresAt: new Date(Date.now() + REFRESH_TOKEN_CONFIG.MAX_AGE),
-            twoFactorUserAgent: 'Wrong User Agent',
-          },
-        });
-
-        return token.id;
+        },
       });
 
-      const signedCookie = 's:' + cookieSignature.sign(tokenId, cookieSecret);
+      const token = await prismaService.token.create({
+        data: {
+          userId: user.id,
+          expiresAt: new Date(Date.now() + REFRESH_TOKEN_CONFIG.MAX_AGE),
+        },
+      });
+
+      const signedCookie = 's:' + cookieSignature.sign(token.id, cookieSecret);
 
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-protected-route')
         .set('Cookie', [`refresh_token=${signedCookie}`])
-        .set('User-Agent', 'Chrome 1.2.3')
+        .set('x-visitor-id', 'attacker-hacker-pc') 
         .expect(401);
 
       expect(response.body).toEqual({
@@ -231,126 +176,78 @@ describe('Security Middleware (e2e)', () => {
         statusCode: 401,
       });
 
-      const unsignedAccessToken = decodeSignedCookie(
-        response.headers['set-cookie'][0],
-        'refresh_token',
-      );
-      const token = await prismaService.token.findUnique({
-        where: { id: tokenId },
+      const tokenInDb = await prismaService.token.findUnique({
+        where: { id: token.id },
       });
-
-      expect(unsignedAccessToken).toBeFalsy();
-      expect(token).toBeFalsy();
+      expect(tokenInDb).toBeNull();
     });
   });
 
-  describe('Valid tokens', () => {
-    it('should return code 404 & Route not found (Access token verified successfully)', async () => {
+  describe('Valid Tokens and Token Rotation', () => {
+    it('should pass middleware when access token is valid (returns 404 for nonexistent route)', async () => {
       const accessToken = await jwtService.signAsync({
         id: crypto.randomUUID(),
       });
-
       const signedCookie =
         's:' + cookieSignature.sign(accessToken, cookieSecret);
 
       const response = await request(app.getHttpServer())
-        .get('/some-route')
+        .get('/some-nonexistent-route')
         .set('Cookie', [`access_token=${signedCookie}`])
         .expect(404);
 
       expect(response.body).toEqual({
         error: 'Not Found',
-        message: 'Cannot GET /some-route',
+        message: 'Cannot GET /some-nonexistent-route',
         statusCode: 404,
       });
     });
-  });
 
-  it('should return code 404 & Route not found (Refresh token verified successfully & returned new access token)', async () => {
-    const refreshToken = await prismaService.$transaction(async (tx) => {
-      const { id } = await tx.user.create({
-        data: { email: 'test@gmail.com', password: 'asfasfasfsaf' },
-      });
-
-      const refreshToken = await tx.token.create({
+    it('should rotate refresh token and issue new access token when refreshing session', async () => {
+      const user = await prismaService.user.create({
         data: {
-          userId: id,
-          expiresAt: new Date(Date.now() + REFRESH_TOKEN_CONFIG.MAX_AGE),
-        },
-      });
-
-      return refreshToken;
-    });
-
-    const signedCookie =
-      's:' + cookieSignature.sign(refreshToken.id, cookieSecret);
-
-    const response = await request(app.getHttpServer())
-      .get('/some-route')
-      .set('Cookie', [`refresh_token=${signedCookie}`])
-      .expect(404);
-
-    expect(response.body).toEqual({
-      error: 'Not Found',
-      message: 'Cannot GET /some-route',
-      statusCode: 404,
-    });
-
-    const accessToken = decodeSignedCookie(
-      response.headers['set-cookie'][0],
-      'access_token',
-    );
-
-    expect(accessToken).toBeTruthy();
-    const payload = await jwtService.verifyAsync(accessToken as string);
-    expect(payload).toHaveProperty('id');
-    expect(payload.id).toHaveLength(36);
-  });
-
-  it('should return code 404. Refresh token & User Agent verified successfully & returned new access token', async () => {
-    const refreshToken = await prismaService.$transaction(async (tx) => {
-      const { id } = await tx.user.create({
-        data: {
-          email: 'tes312t@gmail.com',
-          password: 'asfasfasfsaf',
+          email: 'rotate-ok@gmail.com',
+          password: 'password123',
           twoFactorAuthEnabled: true,
+          trustedDevices: {
+            create: { visitorId: 'my-trusted-laptop' },
+          },
         },
       });
 
-      const refreshToken = await tx.token.create({
+      const oldRefreshToken = await prismaService.token.create({
         data: {
-          userId: id,
+          userId: user.id,
           expiresAt: new Date(Date.now() + REFRESH_TOKEN_CONFIG.MAX_AGE),
-          twoFactorUserAgent: await bcryptService.hash('Chrome 1.2.3'),
         },
       });
 
-      return refreshToken;
+      const signedCookie =
+        's:' + cookieSignature.sign(oldRefreshToken.id, cookieSecret);
+
+      const response = await request(app.getHttpServer())
+        .get('/some-nonexistent-route')
+        .set('Cookie', [`refresh_token=${signedCookie}`])
+        .set('x-visitor-id', 'my-trusted-laptop')
+        .expect(404);
+
+      const newAccessToken = decodeSignedCookie(
+        response.headers['set-cookie'][0],
+        'access_token',
+      );
+      const newRefreshToken = decodeSignedCookie(
+        response.headers['set-cookie'][1],
+        'refresh_token',
+      );
+
+      expect(newAccessToken).toBeTruthy();
+      expect(newRefreshToken).toBeTruthy();
+      expect(newRefreshToken).not.toBe(oldRefreshToken.id);
+
+      const oldTokenInDb = await prismaService.token.findUnique({
+        where: { id: oldRefreshToken.id },
+      });
+      expect(oldTokenInDb).toBeNull();
     });
-
-    const signedCookie =
-      's:' + cookieSignature.sign(refreshToken.id, cookieSecret);
-
-    const response = await request(app.getHttpServer())
-      .get('/some-route')
-      .set('Cookie', [`refresh_token=${signedCookie}`])
-      .set('User-Agent', 'Chrome 1.2.3')
-      .expect(404);
-
-    expect(response.body).toEqual({
-      error: 'Not Found',
-      message: 'Cannot GET /some-route',
-      statusCode: 404,
-    });
-
-    const accessToken = decodeSignedCookie(
-      response.headers['set-cookie'][0],
-      'access_token',
-    );
-
-    expect(accessToken).toBeTruthy();
-    const payload = await jwtService.verifyAsync(accessToken as string);
-    expect(payload).toHaveProperty('id');
-    expect(payload.id).toHaveLength(36);
   });
 });

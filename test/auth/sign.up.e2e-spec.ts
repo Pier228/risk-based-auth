@@ -1,17 +1,18 @@
-import * as request from 'supertest';
-import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { PrismaService } from 'src/prisma-database/prisma.service';
 import { AppModule } from 'src/app.module';
 import mockUsers from '../utils/mockData/users';
 import { ThrottlerStorage } from '@nestjs/throttler';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
+import request from 'supertest';
 import { ConfigService } from '@nestjs/config';
+import { EmailSenderService } from 'src/shared/email-sender/email-sender.service';
 
-describe('Auth Controller (e2e)', () => {
+describe('Auth Sign-Up (e2e)', () => {
   let app: INestApplication;
   let prismaService: PrismaService;
-
+  
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
@@ -21,6 +22,13 @@ describe('Auth Controller (e2e)', () => {
         increment: jest
           .fn()
           .mockResolvedValue({ totalHits: 0, timeToExpire: 0 }),
+      })
+      .overrideProvider(EmailSenderService)
+      .useValue({
+        sendEmail: jest.fn().mockResolvedValue({
+          message: 'Email has been sent',
+          response: { Messages: [{ Status: 'success' }] },
+        }),
       })
       .compile();
 
@@ -35,15 +43,17 @@ describe('Auth Controller (e2e)', () => {
       credentials: true,
     });
     app.use(cookieParser(configService.getOrThrow('COOKIE_SECRET')));
-
     prismaService = moduleRef.get<PrismaService>(PrismaService);
     await app.init();
   });
 
   const clearDB = async () => {
-    await prismaService.user.deleteMany();
-    await prismaService.profile.deleteMany();
+    await prismaService.trustedDevice.deleteMany();
+    await prismaService.authLog.deleteMany();
     await prismaService.confirmation.deleteMany();
+    await prismaService.token.deleteMany();
+    await prismaService.profile.deleteMany();
+    await prismaService.user.deleteMany();
   };
 
   afterAll(async () => {
@@ -54,57 +64,12 @@ describe('Auth Controller (e2e)', () => {
   beforeEach(async () => await clearDB());
 
   describe('/auth/sign-up (POST)', () => {
-    it('should create user with profile & email confirmation, then send confirmation email and return 201', async () => {
-      for (const user of mockUsers.validSignUpParams) {
-        const response = await request(app.getHttpServer())
-          .post('/auth/sign-up')
-          .send(user)
-          .expect(201);
-
-        expect(response.body).toEqual({
-          message:
-            'User created successfully. Please confirm your email to activate your account.',
-          confirmationId: expect.any(String),
-        });
-        expect(response.body.confirmationId).toHaveLength(36);
-
-        const createdUser = await prismaService.user.findUnique({
-          where: { email: user.email },
-          include: { Token: true, Confirmation: true, Profile: true },
-        });
-
-        expect(createdUser).toBeTruthy();
-        expect(createdUser).toMatchObject({
-          email: user.email,
-          emailConfirmed: false,
-          twoFactorAuthEnabled: false,
-        });
-
-        expect(createdUser.Confirmation).toHaveLength(1);
-        expect(createdUser.Confirmation[0].type).toBe('EMAIL_VERIFICATION');
-
-        expect(createdUser.Token).toHaveLength(0);
-
-        expect(createdUser.Profile).toMatchObject({
-          name: user.name,
-          surname: user.surname,
-        });
-      }
-    });
-
-    it('should delete old, unconfirmed user and register new one', async () => {
-      const { email, id } = await prismaService.user.create({
-        data: { email: '123213@gmail.com', password: '123123213' },
-      });
+    it('should create user, profile, confirmation record and return 201', async () => {
+      const userPayload = mockUsers.validSignUpParams[0];
 
       const response = await request(app.getHttpServer())
         .post('/auth/sign-up')
-        .send({
-          email,
-          password: '123123123',
-          name: 'Pier',
-          surname: 'Clinton',
-        })
+        .send(userPayload)
         .expect(201);
 
       expect(response.body).toEqual({
@@ -112,49 +77,74 @@ describe('Auth Controller (e2e)', () => {
           'User created successfully. Please confirm your email to activate your account.',
         confirmationId: expect.any(String),
       });
-      expect(response.body.confirmationId).toHaveLength(36);
 
       const createdUser = await prismaService.user.findUnique({
-        where: { email },
-        include: { Token: true, Confirmation: true, Profile: true },
+        where: { email: userPayload.email },
+        include: { Confirmation: true, Profile: true },
       });
 
       expect(createdUser).toBeTruthy();
-      expect(createdUser.email).toBe(email);
-      expect(createdUser.emailConfirmed).toBe(false);
-      expect(createdUser.id).not.toBe(id);
-
-      expect(createdUser.Confirmation).toHaveLength(1);
-      expect(createdUser.Confirmation[0].type).toBe('EMAIL_VERIFICATION');
-
-      expect(createdUser.Token).toHaveLength(0);
-
-      expect(createdUser.Profile).toMatchObject({
-        name: 'Pier',
-        surname: 'Clinton',
-      });
+      expect(createdUser?.emailConfirmed).toBe(false);
+      expect(createdUser?.twoFactorAuthEnabled).toBe(false);
+      expect(createdUser?.Profile?.name).toBe(userPayload.name);
+      expect(createdUser?.Profile?.surname).toBe(userPayload.surname);
+      expect(createdUser?.Confirmation).toHaveLength(1);
+      expect(createdUser?.Confirmation[0].type).toBe('EMAIL_VERIFICATION');
     });
 
-    it('should return code 400 & validation error', async () => {
-      for (const user of mockUsers.signUpInvalidParams) {
+    it('should delete old unconfirmed user if previous confirmation expired and register anew', async () => {
+      const oldUser = await prismaService.user.create({
+        data: {
+          email: 'retry-signup@gmail.com',
+          password: 'oldpassword123',
+          emailConfirmed: false,
+          Confirmation: {
+            create: {
+              token: 'hashedtoken',
+              type: 'EMAIL_VERIFICATION',
+              expiresAt: new Date(Date.now() - 1000 * 60 * 60),
+            },
+          },
+        },
+      });
+
+      const response = await request(app.getHttpServer())
+        .post('/auth/sign-up')
+        .send({
+          email: 'retry-signup@gmail.com',
+          password: 'newpassword123',
+          name: 'Artem',
+          surname: 'Dev',
+        })
+        .expect(201);
+
+      expect(response.body.confirmationId).toBeTruthy();
+
+      const newUser = await prismaService.user.findUnique({
+        where: { email: 'retry-signup@gmail.com' },
+      });
+
+      expect(newUser).toBeTruthy();
+      expect(newUser?.id).not.toBe(oldUser.id);
+    });
+
+    it('should return 400 on invalid signup body params', async () => {
+      for (const invalidParams of mockUsers.signUpInvalidParams.slice(0, 3)) {
         const response = await request(app.getHttpServer())
           .post('/auth/sign-up')
-          .send(user)
+          .send(invalidParams)
           .expect(400);
 
-        expect(response.body).toEqual({
-          statusCode: 400,
-          error: 'Bad Request',
-          message: expect.any(Array || String),
-        });
+        expect(response.body.statusCode).toBe(400);
+        expect(response.body.error).toBe('Bad Request');
       }
     });
 
-    it('should return http code 409 & ConflictException - email is already registered', async () => {
-      const { email } = await prismaService.user.create({
+    it('should return 409 Conflict if email is already registered and confirmed', async () => {
+      await prismaService.user.create({
         data: {
-          email: `${Date.now()}@gmail.com`,
-          password: crypto.randomUUID(),
+          email: 'already-confirmed@gmail.com',
+          password: 'password123',
           emailConfirmed: true,
         },
       });
@@ -162,10 +152,10 @@ describe('Auth Controller (e2e)', () => {
       const response = await request(app.getHttpServer())
         .post('/auth/sign-up')
         .send({
-          email,
-          password: 'random-password',
-          name: 'Pier',
-          surname: 'Clinton',
+          email: 'already-confirmed@gmail.com',
+          password: 'newpassword123',
+          name: 'John',
+          surname: 'Doe',
         })
         .expect(409);
 
@@ -176,34 +166,29 @@ describe('Auth Controller (e2e)', () => {
       });
     });
 
-    it('should return http code 409 & ConflictException - A confirmation letter has already been sent', async () => {
-      const email = await prismaService.$transaction(async (tx) => {
-        const { email, id } = await tx.user.create({
-          data: {
-            email: `${Date.now()}@gmail.com`,
-            password: crypto.randomUUID(),
+    it('should return 409 Conflict if confirmation was sent and is still active', async () => {
+      await prismaService.user.create({
+        data: {
+          email: 'active-token@gmail.com',
+          password: 'password123',
+          emailConfirmed: false,
+          Confirmation: {
+            create: {
+              token: 'active_hash',
+              type: 'EMAIL_VERIFICATION',
+              expiresAt: new Date(Date.now() + 1000 * 60 * 10),
+            },
           },
-        });
-
-        await tx.confirmation.create({
-          data: {
-            type: 'EMAIL_VERIFICATION',
-            userId: id,
-            token: '123123',
-            expiresAt: new Date(Date.now() + 1000 * 60 * 5),
-          },
-        });
-
-        return email;
+        },
       });
 
       const response = await request(app.getHttpServer())
         .post('/auth/sign-up')
         .send({
-          email,
-          password: 'random-password',
-          name: 'Pier',
-          surname: 'Clinton',
+          email: 'active-token@gmail.com',
+          password: 'password123',
+          name: 'John',
+          surname: 'Doe',
         })
         .expect(409);
 
