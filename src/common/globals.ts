@@ -111,7 +111,7 @@ export const RISK_BASED_AUTH_CONFIG = {
     // 4. Temporal and behavioral factors
     TIMEZONE_MISMATCH: 15, // Discrepancy between system timezone and IP-resolved timezone
     UNUSUAL_LOGIN_TIME: 10, // Sign-in at an atypical time of day for the user (e.g., late night)
-    FAILED_ATTEMPTS_BURST: 20, // Burst of recent failed sign-in attempts within a short window
+    FAILED_ATTEMPTS_BURST: 30, // Burst of recent failed sign-in attempts within a short window
   },
 
   // Velocity parameters for impossible travel detection
