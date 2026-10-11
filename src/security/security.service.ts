@@ -23,11 +23,9 @@ export class SecurityService {
   ) {}
 
   // Enable/Disable Two Factor Authentication for user
-  async toggleTwoFactorAuth(
-    req: RequestWithId,
-    visitorId: string,
-  ): Promise<{ message: string }> {
-    const { id } = req;
+  async toggleTwoFactorAuth(req: RequestWithId): Promise<{ message: string }> {
+    const { id, visitorId } = req;
+
     const user = await this.findUserById(id); // Find user by id
     const twoFactorAuthEnabled = user.twoFactorAuthEnabled;
 
@@ -46,9 +44,14 @@ export class SecurityService {
           await tx.authLog.create({
             data: { userId: id, ...ipInfo },
           });
-          await tx.trustedDevice.create({
-            data: { userId: id, visitorId },
-          });
+          if (visitorId) {
+            await tx.trustedDevice.create({
+              data: {
+                userId: id,
+                visitorId: await this.bcryptService.hash(visitorId),
+              },
+            });
+          }
         } else {
           await tx.authLog.deleteMany({ where: { userId: id } });
           await tx.trustedDevice.deleteMany({ where: { userId: id } });

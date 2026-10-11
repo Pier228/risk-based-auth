@@ -23,8 +23,13 @@ export class SecurityMiddleware implements NestMiddleware {
     try {
       const access_token = req.signedCookies?.['access_token']; // Get the access token
 
+      if (req.headers['x-visitor-id']) {
+        req.visitorId = req.headers['x-visitor-id'] as string;
+      }
+
       if (access_token) {
-        const inBlackList = await this.cacheManager.get<Record<string, any>>(access_token);
+        const inBlackList =
+          await this.cacheManager.get<Record<string, any>>(access_token);
         if (inBlackList) {
           res.clearCookie('access_token');
           throw new UnauthorizedException(
@@ -37,9 +42,15 @@ export class SecurityMiddleware implements NestMiddleware {
           req.id = payload.id; // Set user id in request body
           return next();
         } catch (err: any) {
-          if (err instanceof TokenExpiredError || err?.name === 'TokenExpiredError') {
+          if (
+            err instanceof TokenExpiredError ||
+            err?.name === 'TokenExpiredError'
+          ) {
             res.clearCookie('access_token');
-            await this.tokenService.createAccessTokenUsingRefreshToken(req, res);
+            await this.tokenService.createAccessTokenUsingRefreshToken(
+              req,
+              res,
+            );
             return next();
           }
           throw err;
