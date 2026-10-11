@@ -23,8 +23,8 @@ export class TokenService {
 
   async setAuthCookies(user: User, response: Response): Promise<void> {
     await this.createAndSetAccessToken(response, user.id);
-    const newRefreshToken = await this.createRefreshToken(user);
-    this.setRefreshTokenCookie(response, newRefreshToken);
+    const tokenId = await this.createRefreshToken(user);
+    this.setRefreshTokenCookie(response, tokenId);
   }
 
   async createAccessTokenUsingRefreshToken(
@@ -91,10 +91,10 @@ export class TokenService {
     );
   }
 
-  private setRefreshTokenCookie(res: Response, tokenValue: string): void {
+  private setRefreshTokenCookie(res: Response, tokenId: string): void {
     res.cookie(
       'refresh_token',
-      tokenValue,
+      tokenId,
       getCookieConfig(REFRESH_TOKEN_CONFIG.MAX_AGE),
     );
   }

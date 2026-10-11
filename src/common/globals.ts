@@ -78,3 +78,40 @@ export const PROXY_HEADERS: readonly string[] = [
   'x-appengine-user-ip',
   'cf-pseudo-ipv4',
 ];
+
+export const RISK_BASED_AUTH_CONFIG = {
+  THRESHOLDS: {
+    LOW_RISK_MAX: 29, // 0-29: Allow sign-in without 2FA
+    MEDIUM_RISK_MAX: 74, // 30-74: Require step-up authentication
+    HIGH_RISK_MIN: 75, // >= 75: Critical risk; block attempt and trigger alert
+  },
+
+  // Penalty scores for detected anomalies
+  PENALTIES: {
+    // 1. Device anomalies (Browser Fingerprinting)
+    VISITOR_ID_MISMATCH: 30, // visitorId from FingerprintJS
+
+    // 2. Geographic anomalies
+    NEW_COUNTRY: 35, // Sign-in from a country not previously recorded in history
+    NEW_CITY: 15, // New city within the same country
+    NEW_REGION: 10, // New region/state within the same country
+    NEW_CONTINENT: 40, // Sign-in from a continent not previously recorded in history
+    IMPOSSIBLE_TRAVEL: 100, // Physically impossible travel velocity between locations
+
+    // 3. Network anomalies
+    VPN_OR_PROXY_DETECTED: 30, // Public VPN, proxy, or Tor exit node detected
+    DATA_CENTER_IP: 40, // IP belongs to a hosting provider or data center (AWS, DigitalOcean, etc.)
+    NEW_ASN_OR_ISP: 15, // Change in autonomous system (ASN) or Internet service provider (ISP)
+
+    // 4. Temporal and behavioral factors
+    TIMEZONE_MISMATCH: 25, // Discrepancy between system timezone and IP-resolved timezone
+    UNUSUAL_LOGIN_TIME: 10, // Sign-in at an atypical time of day for the user (e.g., late night)
+    FAILED_ATTEMPTS_BURST: 30, // Burst of recent failed sign-in attempts within a short window
+  },
+
+  // Velocity parameters for impossible travel detection
+  VELOCITY_LIMITS: {
+    MAX_REALISTIC_SPEED_KMH: 900, // Maximum realistic travel speed (km/h, commercial airliner)
+    MIN_TIME_INTERVAL_SECONDS: 60, // Minimum time delta between events to avoid division by zero
+  },
+};
