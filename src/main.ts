@@ -27,6 +27,8 @@ async function bootstrap() {
       'Content-Type',
       'Authorization',
       'x-visitor-id', // Custom header for visitorId from FingerprintJS
+      'x-timezone',
+      'x-client-timezone',
       ...PROXY_HEADERS,
     ], // Allowed headers in requests
   });

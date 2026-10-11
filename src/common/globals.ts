@@ -27,6 +27,11 @@ export const REFRESH_TOKEN_CONFIG = {
   MAX_AGE: 1000 * 60 * 60 * 24 * 7, // 7 days in milliseconds
 };
 
+export const FAILED_LOGIN_ATTEMPTS_CONFIG = {
+  MAX_ATTEMPTS: 3, // Maximum failed login attempts 
+  LOCKOUT_DURATION: 10 * 60 * 1000, // Lockout duration in milliseconds (10 minutes)
+};
+
 export const getCookieConfig = (maxAge: number): CookieOptions => ({
   httpOnly: true, // Prevents client-side JavaScript from accessing the cookie
   secure: true, // Ensures cookies are only sent over HTTPS connections
@@ -93,8 +98,8 @@ export const RISK_BASED_AUTH_CONFIG = {
 
     // 2. Geographic anomalies
     NEW_COUNTRY: 35, // Sign-in from a country not previously recorded in history
-    NEW_CITY: 15, // New city within the same country
-    NEW_REGION: 10, // New region/state within the same country
+    NEW_CITY: 10, // New city within the same country
+    NEW_REGION: 15, // New region/state within the same country
     NEW_CONTINENT: 40, // Sign-in from a continent not previously recorded in history
     IMPOSSIBLE_TRAVEL: 100, // Physically impossible travel velocity between locations
 
@@ -104,9 +109,9 @@ export const RISK_BASED_AUTH_CONFIG = {
     NEW_ASN_OR_ISP: 15, // Change in autonomous system (ASN) or Internet service provider (ISP)
 
     // 4. Temporal and behavioral factors
-    TIMEZONE_MISMATCH: 25, // Discrepancy between system timezone and IP-resolved timezone
+    TIMEZONE_MISMATCH: 15, // Discrepancy between system timezone and IP-resolved timezone
     UNUSUAL_LOGIN_TIME: 10, // Sign-in at an atypical time of day for the user (e.g., late night)
-    FAILED_ATTEMPTS_BURST: 30, // Burst of recent failed sign-in attempts within a short window
+    FAILED_ATTEMPTS_BURST: 20, // Burst of recent failed sign-in attempts within a short window
   },
 
   // Velocity parameters for impossible travel detection

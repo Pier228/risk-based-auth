@@ -1,4 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { Response } from 'express';
 import { Prisma, User } from 'generated/prisma';
 import { PrismaService } from 'src/prisma-database/prisma.service';
@@ -12,6 +14,7 @@ export class PostConfirmationService {
     private readonly prisma: PrismaService,
     private readonly tokenService: TokenService,
     private readonly ipService: IPService,
+    @Inject(CACHE_MANAGER) private readonly cacheManager: Cache,
   ) {}
 
   // Confirm the user's email address & set up access & refresh token inside cookies.
@@ -66,9 +69,7 @@ export class PostConfirmationService {
 
     // 2. Add current device to TrustedDevice
     const visitorId =
-      (request as RequestWithId).visitorId ||
-      (request.headers['x-visitor-id'] as string);
-
+      request.visitorId || (request.headers['x-visitor-id'] as string);
     if (visitorId) {
       const isDeviceLinked = await prisma.trustedDevice.findFirst({
         where: { userId: id, visitorId },
@@ -79,6 +80,9 @@ export class PostConfirmationService {
         });
       }
     }
+
+    // 3. Reset failed attempt counter in Redis
+    await this.cacheManager.del(`failed_attempts:${id}`);
 
     return this.authorizeUser(user, response); // Create and set auth cookies
   }

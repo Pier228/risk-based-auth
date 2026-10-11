@@ -60,6 +60,9 @@ export class AuthService {
 
     // Check if user exists and password matches
     if (!user || !(await this.bcryptService.compare(password, user.password))) {
+      if (user) {
+        await this.securityService.recordFailedLoginAttempt(user.id);
+      }
       throw new UnauthorizedException('Wrong email or password');
     }
 
@@ -69,11 +72,14 @@ export class AuthService {
     }
 
     // Two factor auth
-    user.twoFactorAuthEnabled &&
-      (await this.twoFactorAuthSecurity(user, request));
+    if (user.twoFactorAuthEnabled) {
+      await this.twoFactorAuthSecurity(user, request);
+    }
+
+    // Successful sign-in without 2FA (or after completing it) resets the failed attempt counter
+    await this.securityService.clearFailedLoginAttempts(user.id);
 
     await this.tokenService.setAuthCookies(user, response); // Create and set auth cookies
-
     return { message: 'User successfully logged in' };
   }
 
